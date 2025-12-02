@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R
+from src.smoothing import MultiChannelSmoother
 
 class PoseSolver:
     def __init__(self):
@@ -21,6 +22,18 @@ class PoseSolver:
             "neck": np.array([0, 0, 1]),
         }
         self.initial_hip_pos = None
+        # Smoothing / continuity state for yaw to avoid flips and sudden jumps
+        self.torso_yaw_smoothed = 0.0
+        self.pelvis_yaw_smoothed = 0.0
+        self.prev_torso_raw = None
+        self.prev_pelvis_raw = None
+        # smoothing coefficient (0..1), higher = more responsive
+        self.yaw_smoothing_alpha = 0.25
+        
+        # Initialize OneEuroFilter for all bones
+        # min_cutoff=1.0: Filters out jitter > 1Hz when still
+        # beta=0.5: Reduces latency when moving fast
+        self.smoother = MultiChannelSmoother(min_cutoff=1.0, beta=0.5)
 
     def calibrate(self, landmarks):
         """
@@ -504,6 +517,8 @@ class PoseSolver:
         # --- 1. SPINE & HEAD (FK) ---
         # Uses POSE landmarks
         
+        # Calculate mid points for body structure
+        # CRITICAL: These should be stable even when head moves
         mid_hip = type('P', (), {})()
         mid_hip.x = (pose_lm[23].x + pose_lm[24].x) / 2
         mid_hip.y = (pose_lm[23].y + pose_lm[24].y) / 2
@@ -515,59 +530,229 @@ class PoseSolver:
         mid_shoulder.z = (pose_lm[11].z + pose_lm[12].z) / 2
         
         # --- TORSO (Main Body Rotation) ---
-        # Vector from Hips to Shoulders
+        # Vector from Hips to Shoulders (pitch/tilt of the torso)
         spine_vec = self.get_vector(mid_hip, mid_shoulder)
         
-        # Calculate Global Torso Rotation
-        # Rest Vector for Spine/Torso is +Z (Up)
-        q_torso_global = self.rotation_between_vectors(np.array([0, 0, 1]), spine_vec)
+        # Calculate torso pitch (lean forward/back) from hip->shoulder vector
+        # IMPORTANT: This should NOT be affected by head movement
+        q_torso_pitch = self.rotation_between_vectors(np.array([0, 0, 1]), spine_vec)
+        
+        # --- TORSO YAW (rotation around vertical axis when turning) ---
+        # Use shoulder line orientation to detect body rotation
+        # Left shoulder (11) and Right shoulder (12)
+        shoulder_vec = self.get_vector(pose_lm[11], pose_lm[12])
+        
+        # STABILITY CHECK: Validate shoulder vector is reasonable
+        shoulder_length = np.linalg.norm(shoulder_vec)
+        
+        # DEBUG: Print shoulder info to detect asymmetry
+        print(f"Shoulder vec: [{shoulder_vec[0]:.3f}, {shoulder_vec[1]:.3f}, {shoulder_vec[2]:.3f}], length: {shoulder_length:.3f}")
+        
+        # Only calculate yaw if shoulder detection is stable
+        if shoulder_length > 0.05 and shoulder_length < 1.5:  # Relaxed bounds
+            # MIRROR MODE: Invert forward component so user right = character left
+            shoulder_forward = -shoulder_vec[1]  # INVERTED Y component for mirror
+            shoulder_lateral = shoulder_vec[0]   # X component (left/right)
+
+            # Raw yaw angle from current shoulder orientation
+            yaw_angle_raw = np.arctan2(shoulder_forward, shoulder_lateral)
+            # Add fixed 180° offset if your rig requires it
+            yaw_raw = yaw_angle_raw + (np.pi / 2) * 2  # +180° offset for T-pose neutral
+
+            # Angle continuity (unwrap) to avoid flips around the ±π boundary
+            if self.prev_torso_raw is not None:
+                # bring yaw_raw close to prev by adding/subtracting 2π if needed
+                diff = yaw_raw - self.prev_torso_raw
+                if diff > np.pi:
+                    yaw_raw -= 2 * np.pi
+                elif diff < -np.pi:
+                    yaw_raw += 2 * np.pi
+            # initialize prev if needed
+            self.prev_torso_raw = yaw_raw if self.prev_torso_raw is None else self.prev_torso_raw
+
+            # Exponential smoothing (IIR) on yaw angle to avoid sudden jumps
+            self.torso_yaw_smoothed = (
+                self.yaw_smoothing_alpha * yaw_raw
+                + (1.0 - self.yaw_smoothing_alpha) * self.torso_yaw_smoothed
+            )
+
+            yaw_angle = self.torso_yaw_smoothed
+            # keep prev raw aligned to smoothed value for next unwrap
+            self.prev_torso_raw = yaw_raw
+        else:
+            # Shoulders unstable - keep last smoothed value (freeze)
+            yaw_angle = self.torso_yaw_smoothed
+        
+        # Create yaw quaternion (rotation around Z-axis)
+        # Quaternion for Z-axis rotation: [cos(θ/2), 0, 0, sin(θ/2)]
+        q_torso_yaw = np.array([
+            np.cos(yaw_angle / 2),
+            0,
+            0,
+            np.sin(yaw_angle / 2)
+        ])
+        
+        # Combine pitch and yaw for total torso rotation
+        # Apply yaw first, then pitch (order matters for gimbal-free rotation)
+        q_torso_global = self.multiply_quaternions(q_torso_yaw, q_torso_pitch)
         
         # Apply to "torso" bone (Root of the spine chain)
         bones["torso_rot"] = q_torso_global.tolist()
         
         # --- SPINE CURVATURE ---
         # Apply a fraction of the torso rotation to the spine bones to create a curve.
-        # Since spine_fk is a child of torso, this adds to the existing lean.
-        q_spine_curve = self.scale_quaternion_rotation(q_torso_global, 0.2) # 20% curve
+        # Distribute yaw rotation to spine for natural twisting
+        q_spine_yaw = self.scale_quaternion_rotation(q_torso_yaw, 0.3)  # 30% of yaw
+        q_spine_pitch = self.scale_quaternion_rotation(q_torso_pitch, 0.2)  # 20% of pitch
+        q_spine_curve = self.multiply_quaternions(q_spine_yaw, q_spine_pitch)
         
         bones["spine_fk"] = q_spine_curve.tolist()
         bones["spine_fk.001"] = q_spine_curve.tolist()
+        
+        # --- PELVIS/HIPS (for legs anchor) ---
+        # The pelvis should have its own rotation based on HIP orientation, not torso
+        # This is critical: legs are attached to pelvis, not spine
+        
+        # Calculate pelvis yaw from hip line orientation
+        hip_vec = self.get_vector(pose_lm[23], pose_lm[24])  # Left hip → Right hip
+        
+        # STABILITY CHECK: Validate hip vector is reasonable
+        hip_length = np.linalg.norm(hip_vec)
+        
+        # DEBUG: Print hip info
+        print(f"Hip vec: [{hip_vec[0]:.3f}, {hip_vec[1]:.3f}, {hip_vec[2]:.3f}], length: {hip_length:.3f}")
+        
+        # Only calculate pelvis yaw if hip detection is stable
+        if hip_length > 0.05 and hip_length < 1.5:  # Relaxed bounds (same as shoulders)
+            # MIRROR MODE: Invert forward component
+            hip_forward = -hip_vec[1]  # INVERTED Y component for mirror
+            hip_lateral = hip_vec[0]  # X component (left/right)
 
-        # --- HEAD ---
-        # Calculate Head Rotation
+            # Raw pelvis yaw
+            pelvis_yaw_raw = np.arctan2(hip_forward, hip_lateral)
+            pelvis_yaw_raw = pelvis_yaw_raw + (np.pi / 2) * 2  # Same 180° offset as torso
+
+            # Unwrap relative to previous pelvis raw to keep continuity
+            if self.prev_pelvis_raw is not None:
+                diff_p = pelvis_yaw_raw - self.prev_pelvis_raw
+                if diff_p > np.pi:
+                    pelvis_yaw_raw -= 2 * np.pi
+                elif diff_p < -np.pi:
+                    pelvis_yaw_raw += 2 * np.pi
+
+            # Exponential smoothing for pelvis yaw
+            self.pelvis_yaw_smoothed = (
+                self.yaw_smoothing_alpha * pelvis_yaw_raw
+                + (1.0 - self.yaw_smoothing_alpha) * self.pelvis_yaw_smoothed
+            )
+            pelvis_yaw = self.pelvis_yaw_smoothed
+            self.prev_pelvis_raw = pelvis_yaw_raw
+        else:
+            # Hips unstable - keep last smoothed value (freeze)
+            pelvis_yaw = self.pelvis_yaw_smoothed
+        
+        # Create pelvis yaw quaternion
+        q_pelvis_yaw = np.array([
+            np.cos(pelvis_yaw / 2),
+            0,
+            0,
+            np.sin(pelvis_yaw / 2)
+        ])
+        
+        # Pelvis should have minimal pitch (hips don't tilt much)
+        # Use identity quaternion or very small fraction of torso pitch
+        q_pelvis_global = q_pelvis_yaw  # Pelvis only rotates (yaw), minimal tilt
+
+        # --- HEAD & NECK ---
+        # Calculate Head and Neck Rotation with proper pitch (up/down) handling
+        # MIRROR MODE: User movements are mirrored (User Left = Character Right)
         
         if len(pose_lm) > 0:
-            # Construct a "Head Up" vector
-            # Mid-Shoulder (Neck Base) -> Mid-Ear (Head Center)
+            # Use NOSE (moves more than ears when turning head)
+            nose = pose_lm[0]
             l_ear = pose_lm[7]
             r_ear = pose_lm[8]
+            l_eye = pose_lm[2]
+            r_eye = pose_lm[5]
             
+            # Mid-ear for reference
             mid_ear = type('P', (), {})()
             mid_ear.x = (l_ear.x + r_ear.x) / 2
             mid_ear.y = (l_ear.y + r_ear.y) / 2
             mid_ear.z = (l_ear.z + r_ear.z) / 2
             
-            head_vec = self.get_vector(mid_shoulder, mid_ear)
+            # Mid-eye for better pitch detection
+            mid_eye = type('P', (), {})()
+            mid_eye.x = (l_eye.x + r_eye.x) / 2
+            mid_eye.y = (l_eye.y + r_eye.y) / 2
+            mid_eye.z = (l_eye.z + r_eye.z) / 2
             
-            # Calculate Global Head Rotation
-            # Rest vector for Head is [0, 0, 1] (Up)
-            q_head_global = self.rotation_between_vectors(np.array([0, 0, 1]), head_vec)
+            # --- DETECT PITCH (up/down tilt) ---
+            # When looking down: nose.z < eye.z (negative pitch)
+            # When looking up: nose.z > eye.z (positive pitch)
+            pitch_raw = (nose.z - mid_eye.z) * 8.0  # Reduced sensitivity
             
-            # Apply to Head bone
-            # Head is child of Neck -> Spine... -> Torso.
-            # We need Head Local.
-            # Parent Global is roughly Torso Global (since Spine/Neck are small).
-            # To be precise, Parent Global = Torso * Spine_Curve * Spine_Curve...
-            # But approximating with Torso Global is usually fine for Head stability.
-            q_parent_global = q_torso_global
+            # LIMIT pitch to realistic range: -30° to +20°
+            pitch_amount = np.clip(pitch_raw, -30.0, 20.0)
             
-            q_head_local = self.multiply_quaternions(self.invert_quaternion(q_parent_global), q_head_global)
+            # --- NECK ROTATION (absorbs part of pitch) ---
+            # Base neck vector: shoulder to mid_ear
+            neck_base_vec = self.get_vector(mid_shoulder, mid_ear)
             
-            # EXAGGERATE HEAD MOVEMENT
-            q_head_local = self.scale_quaternion_rotation(q_head_local, 1.5) # 150% movement
+            # Apply pitch to neck (neck tilts forward/back when looking down/up)
+            # Increase neck contribution slightly so neck is visible when looking down
+            neck_pitch_factor = pitch_amount * 0.35
+
+            # Adjust neck vector with pitch
+            # When pitch is negative (looking down), tilt neck forward (increase Y)
+            # Use a slightly larger multiplier to make the neck flex visibly
+            neck_vec = np.array([
+                neck_base_vec[0],
+                neck_base_vec[1] + neck_pitch_factor * 0.05,
+                neck_base_vec[2]
+            ])
+            neck_vec = self.normalize(neck_vec)
             
+            # Calculate neck rotation
+            q_neck_global = self.rotation_between_vectors(np.array([0, 0, 1]), neck_vec)
+            
+            # Neck is child of torso
+            q_neck_local = self.multiply_quaternions(self.invert_quaternion(q_torso_global), q_neck_global)
+            bones["neck"] = q_neck_local.tolist()
+            
+            # --- HEAD ROTATION (child of neck, absorbs remaining pitch) ---
+            # Calculate YAW (left/right): Use horizontal position of nose relative to face center
+            # MIRROR MODE: Invert X for mirror effect
+            yaw_raw = -(nose.x - mid_eye.x) * 50.0  # Reduced from 70.0
+            yaw_diff = np.clip(yaw_raw, -80.0, 80.0)  # Limit left/right rotation
+            
+            # Build a physical target vector from neck to nose (this represents where the head should look)
+            head_target_vec = self.get_vector(mid_ear, nose)
+            # Mirror X for mirror mode (we used mirrored yaw previously)
+            head_target_vec[0] = -head_target_vec[0]
+            
+            # CRITICAL FIX (revised): rotate the target so neutral = looking straight ahead.
+            # Previous mapping rotated the opposite direction; use forward rotation instead.
+            # Mapping: Original: [X, Y_forward, Z_up] -> Corrected: [X, Z, -Y]
+            # This rotates the forward component into the up axis in the forward direction.
+            head_target_corrected = np.array([
+                head_target_vec[0],      # Keep X (left/right) as-is
+                head_target_vec[2],      # Y becomes Z (use up component as forward)
+                -head_target_vec[1]      # Z becomes -Y (forward becomes up with sign inverted)
+            ])
+            head_target_corrected = self.normalize(head_target_corrected)
+
+            # Debug to confirm correction direction
+            # print(f"DBG Head corrected vec: {head_target_corrected}")
+
+            # Calculate head rotation in global space aligning head +Z to the target vector
+            q_head_global = self.rotation_between_vectors(np.array([0, 0, 1]), head_target_corrected)
+            
+            # Head is child of NECK
+            # Calculate local rotation relative to neck
+            q_head_local = self.multiply_quaternions(self.invert_quaternion(q_neck_global), q_head_global)
+
             bones["head_fk"] = q_head_local.tolist()
-            bones["neck"] = [1, 0, 0, 0]
         else:
             bones["head_fk"] = [1, 0, 0, 0]
             bones["neck"] = [1, 0, 0, 0]
@@ -612,7 +797,8 @@ class PoseSolver:
         q_thigh_L_global = calc_global_rot(pose_lm, 24, 26, "right_up_leg")
         q_shin_L_global = calc_global_rot(pose_lm, 26, 28, "right_leg")
         
-        q_thigh_L_local = self.multiply_quaternions(self.invert_quaternion(q_spine_global), q_thigh_L_global)
+        # Use pelvis (pitch only) instead of spine (pitch+yaw) to prevent rotation issues
+        q_thigh_L_local = self.multiply_quaternions(self.invert_quaternion(q_pelvis_global), q_thigh_L_global)
         bones["thigh_fk.L"] = q_thigh_L_local.tolist()
         
         q_thigh_L_inv = self.invert_quaternion(q_thigh_L_global)
@@ -624,7 +810,8 @@ class PoseSolver:
         q_thigh_R_global = calc_global_rot(pose_lm, 23, 25, "left_up_leg")
         q_shin_R_global = calc_global_rot(pose_lm, 25, 27, "left_leg")
         
-        q_thigh_R_local = self.multiply_quaternions(self.invert_quaternion(q_spine_global), q_thigh_R_global)
+        # Use pelvis (pitch only) instead of spine (pitch+yaw) to prevent rotation issues
+        q_thigh_R_local = self.multiply_quaternions(self.invert_quaternion(q_pelvis_global), q_thigh_R_global)
         bones["thigh_fk.R"] = q_thigh_R_local.tolist()
         
         q_thigh_R_inv = self.invert_quaternion(q_thigh_R_global)
@@ -764,4 +951,8 @@ class PoseSolver:
         r_knee_offset = (r_knee_raw - mid_hip_raw) * SCALE
         bones["thigh_ik_target.R"] = r_knee_offset.tolist()
 
-        return bones
+        # --- 6. SMOOTHING ---
+        # Apply OneEuroFilter to all bone data
+        smoothed_bones = self.smoother.update(bones)
+        
+        return smoothed_bones
