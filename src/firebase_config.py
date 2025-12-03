@@ -51,7 +51,7 @@ def initialize_firebase():
             _firebase_available = True
             return True
         
-        # Opción 3: Credenciales por defecto (gcloud)
+        # Opción 3: Credenciales por defecto
         print("⚠ No se encontró serviceAccountKey.json")
         print("  Intentando usar credenciales por defecto de gcloud...")
         

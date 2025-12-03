@@ -18,14 +18,12 @@ class PoseDetector:
         if not success:
             return None, None
         
-        # Convert to RGB
+        # Convertir a RGB
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image_rgb.flags.writeable = False
         
-        # Process
         results = self.holistic.process(image_rgb)
         
-        # Draw for visualization
         image_rgb.flags.writeable = True
         image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
         

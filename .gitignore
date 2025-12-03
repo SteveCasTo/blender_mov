@@ -1,7 +1,4 @@
 serviceAccountKey.json
-*.json
-!output_animation.json
-!package.json
 
 __pycache__/
 *.py[cod]

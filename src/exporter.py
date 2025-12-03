@@ -7,7 +7,7 @@ class MocapRecorder:
         self.output_file = output_file
         self.frames = []
         self.start_time = None
-        self.framerate = 30 # Default, will be updated or estimated
+        self.framerate = 30
         
         # Verificar Firebase al iniciar
         if is_firebase_available():

@@ -21,6 +21,8 @@ class PoseSolver:
             "right_leg": np.array([0, 0, -1]),
             "neck": np.array([0, 0, 1]),
         }
+        self.rest_hand_basis = {}
+        self.initial_hip_pos = None
         self.initial_hip_pos = None
         # Smoothing / continuity state for yaw to avoid flips and sudden jumps
         self.torso_yaw_smoothed = 0.0
@@ -83,6 +85,25 @@ class PoseSolver:
         self.rest_vectors["left_forearm"] = get_calib_vec(13, 15)
         self.rest_vectors["right_arm"] = get_calib_vec(12, 14)
         self.rest_vectors["right_forearm"] = get_calib_vec(14, 16)
+        
+        # Hands Basis Calibration (if hands are visible)
+        # We need landmarks for hands. The 'landmarks' arg passed to calibrate 
+        # is usually just pose_landmarks. We might not have hand landmarks here 
+        # if the user is just standing in T-Pose without hand tracking active/calibrated.
+        # However, we can approximate using Wrist(15/16), Index(19/20), Pinky(17/18) from POSE landmarks?
+        # MediaPipe Pose has:
+        # 15: Left Wrist, 17: Left Pinky, 19: Left Index
+        # 16: Right Wrist, 18: Right Pinky, 20: Right Index
+        
+        # Left Hand (15, 19, 17) -> Wrist, Index, Pinky
+        self.rest_hand_basis["left"] = self.calculate_basis_rotation(
+            converted_lm[15], converted_lm[19], converted_lm[17]
+        )
+        
+        # Right Hand (16, 20, 18) -> Wrist, Index, Pinky
+        self.rest_hand_basis["right"] = self.calculate_basis_rotation(
+            converted_lm[16], converted_lm[20], converted_lm[18]
+        )
         
         # Legs
         self.rest_vectors["left_up_leg"] = get_calib_vec(23, 25)
@@ -209,6 +230,47 @@ class PoseSolver:
         # Normalize quaternion
         q = np.array([q_w, q_xyz[0], q_xyz[1], q_xyz[2]])
         return self.normalize(q)
+
+    def calculate_basis_rotation(self, origin, p_primary, p_secondary):
+        """
+        Calculate rotation from 3 points defining a plane.
+        origin: Wrist
+        p_primary: Index or Middle MCP (defines Forward vector)
+        p_secondary: Pinky MCP (defines Plane)
+        
+        Returns: Quaternion [w, x, y, z] representing the orientation of this basis
+        """
+        v_forward = self.normalize(self.get_vector(origin, p_primary))
+        v_temp = self.normalize(self.get_vector(origin, p_secondary))
+        
+        # Calculate Normal (Up/Down)
+        v_normal = self.normalize(np.cross(v_forward, v_temp))
+        
+        # Calculate Right vector
+        # Ensure right-handed coordinate system: Cross(Y, Z) = X
+        # v_forward is Y-axis, v_normal is Z-axis (roughly)
+        v_right = self.normalize(np.cross(v_forward, v_normal))
+        
+        # Re-calculate normal to ensure orthogonality
+        v_normal = np.cross(v_right, v_forward)
+        
+        # Construct Rotation Matrix (Columns: X, Y, Z)
+        matrix = np.column_stack((v_right, v_forward, v_normal))
+        
+        # Check determinant to avoid "Non-positive determinant" error
+        if np.linalg.det(matrix) < 0:
+            # Flip one axis to make it right-handed (e.g., Normal)
+            v_normal = -v_normal
+            matrix = np.column_stack((v_right, v_forward, v_normal))
+        
+        # Convert to Quaternion
+        try:
+            r = R.from_matrix(matrix)
+            q = r.as_quat()
+            # Scipy returns [x, y, z, w], we need [w, x, y, z]
+            return np.array([q[3], q[0], q[1], q[2]])
+        except ValueError:
+            return np.array([1, 0, 0, 0])
 
     def multiply_quaternions(self, q1, q2):
         """
@@ -821,62 +883,198 @@ class PoseSolver:
         # --- 4. FINGERS (FK) ---
         # MIRROR MODE
         
-        def solve_finger_chain(lm_list, prefix, indices, parent_global_rot, side_name):
+        def solve_finger_chain(lm_list, prefix, indices, parent_global_rot, side_name, palm_normal):
             if not lm_list: return
             
-            # Note: side_name passed here is the CHARACTER side (e.g., "left")
-            # But we need to use the REST VECTOR of the USER side? 
-            # No, we are mapping User Right Hand -> Character Left Hand.
-            # The "rest_vec_name" in calc_global_rot uses "left_arm" etc.
-            # If we are solving for Character Left Hand, we should use "left_arm" rest vector?
-            # Actually, the landmarks are from User Right Hand. 
-            # User Right Hand rest vector is "right_arm".
-            # So we should use "right_arm" rest vector for calculating rotation of User Right Hand.
-            # And then apply that rotation to Character Left Hand.
-            
-            # Determine source side for rest vector lookup
-            source_side = "right" if side_name == "left" else "left"
-            
+            # Helper to create a Point from coordinates
+            class TempPoint:
+                def __init__(self, x, y, z):
+                    self.x, self.y, self.z = x, y, z
+
             # 1. Proximal (MCP -> PIP)
-            q_prox_global = calc_global_rot(lm_list, indices[0], indices[1], f"{source_side}_arm") 
+            # Construct a 3rd point to define the plane (Start + Palm Normal)
+            # This forces the finger's "Up" vector to align with the Palm Normal
+            start = lm_list[indices[0]]
+            p_normal_target = TempPoint(start.x + palm_normal[0], start.y + palm_normal[1], start.z + palm_normal[2])
+            
+            q_prox_global = self.calculate_basis_rotation(start, lm_list[indices[1]], p_normal_target)
             q_prox_local = self.multiply_quaternions(self.invert_quaternion(parent_global_rot), q_prox_global)
             bones[f"{prefix}.01.{side_name[0].upper()}"] = q_prox_local.tolist()
             
             # 2. Intermediate (PIP -> DIP)
-            q_inter_global = calc_global_rot(lm_list, indices[1], indices[2], f"{source_side}_arm")
+            start = lm_list[indices[1]]
+            p_normal_target = TempPoint(start.x + palm_normal[0], start.y + palm_normal[1], start.z + palm_normal[2])
+            
+            q_inter_global = self.calculate_basis_rotation(start, lm_list[indices[2]], p_normal_target)
             q_inter_local = self.multiply_quaternions(self.invert_quaternion(q_prox_global), q_inter_global)
             bones[f"{prefix}.02.{side_name[0].upper()}"] = q_inter_local.tolist()
             
             # 3. Distal (DIP -> Tip)
-            q_dist_global = calc_global_rot(lm_list, indices[2], indices[3], f"{source_side}_arm")
+            start = lm_list[indices[2]]
+            p_normal_target = TempPoint(start.x + palm_normal[0], start.y + palm_normal[1], start.z + palm_normal[2])
+            
+            q_dist_global = self.calculate_basis_rotation(start, lm_list[indices[3]], p_normal_target)
             q_dist_local = self.multiply_quaternions(self.invert_quaternion(q_inter_global), q_dist_global)
             bones[f"{prefix}.03.{side_name[0].upper()}"] = q_dist_local.tolist()
 
         # Left Hand (Character) <- Right Hand (User)
         if right_hand_lm:
-            # Calculate Hand Global Rotation (Wrist -> Middle MCP)
-            q_hand_L_global = calc_global_rot(right_hand_lm, 0, 9, "right_forearm")
-            bones["hand_fk.L"] = self.multiply_quaternions(self.invert_quaternion(q_forearm_L_global), q_hand_L_global).tolist()
+            # Calculate Hand Global Rotation using 3 points (Wrist, Index, Pinky)
+            # 0: Wrist, 5: Index MCP, 17: Pinky MCP
+            q_hand_L_global = self.calculate_basis_rotation(right_hand_lm[0], right_hand_lm[5], right_hand_lm[17])
+            
+            # Calculate relative rotation from Rest Pose
+            # Character Left Hand corresponds to User Right Hand Rest Basis
+            q_rest = self.rest_hand_basis.get("right", np.array([1, 0, 0, 0]))
+            q_diff = self.multiply_quaternions(q_hand_L_global, self.invert_quaternion(q_rest))
+            
+            # Apply to parent (Forearm)
+            # But wait, q_diff is the GLOBAL rotation difference.
+            # We need to apply this relative to the Forearm's current global rotation?
+            # Or just replace the hand rotation?
+            # The bone rotation in Blender is Local.
+            # Local = Parent_Global_Inv * Child_Global
+            
+            # We constructed q_hand_L_global as an absolute orientation in Blender space.
+            # However, our basis construction might not align perfectly with the bone axes if T-Pose wasn't perfect.
+            # That's why we use q_diff (Rotation from Rest).
+            # Global_Current = Rest_Global * q_diff (roughly)
+            # Actually, let's try using q_hand_L_global directly if we trust the basis mapping (Y=Forward).
+            # If we use q_diff, we are saying "Rotate the hand by X degrees from T-pose".
+            
+            # Let's try the standard Local conversion:
+            # q_hand_L_local = inv(q_forearm_L_global) * q_hand_L_global
+            
+            # But we need q_hand_L_global to be correct relative to the Rest Pose.
+            # If we use calculate_basis_rotation, we get the absolute orientation of the triangle 0-5-17.
+            # In T-Pose, this triangle has a specific orientation (Rest Basis).
+            # We want the Bone to have the same rotation relative to its Rest Pose.
+            
+            # Let's use the delta rotation approach which is more robust to rig differences:
+            # 1. Calculate Delta: Q_delta = Q_current * inv(Q_rest)
+            # 2. Apply Delta to the known Rest Vector of the arm?
+            # No, simpler:
+            # The Bone's Global Rotation should be: Q_bone_global = Q_delta * Q_bone_rest_global
+            # Q_bone_rest_global is roughly "Left Arm Out".
+            
+            # Let's try the direct basis mapping first, it's cleaner if it works.
+            # We assume the bone Y axis points from Wrist to Middle Finger.
+            # Our basis Y axis points from Wrist to Index (or Middle).
+            # Let's use Middle (9) for Forward to match bone axis better.
+            q_hand_L_global = self.calculate_basis_rotation(right_hand_lm[0], right_hand_lm[9], right_hand_lm[17])
+            
+            # Fix for Mirroring? 
+            # User Right Hand (Basis) -> Character Left Hand.
+            # If we just map the basis, X might be inverted.
+            # Basis: Y=Forward, Z=Up, X=Right.
+            # User Right Hand: Y=Left, Z=Back, X=Up?
+            # Let's rely on the calibration delta, it handles the coordinate system transform implicitly.
+            
+            q_current = q_hand_L_global
+            q_rest = self.rest_hand_basis.get("right", np.array([1, 0, 0, 0]))
+            
+            # Delta: Rotation from Rest to Current
+            q_delta = self.multiply_quaternions(q_current, self.invert_quaternion(q_rest))
+            
+            # Apply Delta to the standard "Left Arm" orientation (Identity/Rest)
+            # Character Left Hand Rest: Points +X.
+            # We want to rotate it by q_delta.
+            # New Global = q_delta * Rest_Orientation
+            # Rest Orientation for Left Hand is usually just Identity (if parent is aligned) or +X.
+            # Actually, let's just use the Local calculation:
+            # Local = Inv(Parent_Global) * Current_Global
+            # We need Current_Global to be correct for the Character.
+            
+            # If we assume the User's Hand Basis IS the Character's Hand Basis (mirrored),
+            # Then q_hand_L_global (calculated from User Right Hand) needs to be mirrored?
+            # Mirroring a quaternion basis is tricky.
+            
+            # Alternative: Use the "Rotation Between Vectors" for the main axis (as before)
+            # AND add the Twist rotation.
+            # But 3-point basis is better.
+            
+            # Let's try applying q_delta to the Character's Rest Pose.
+            # Character Left Hand Rest Global: Points +X (Left).
+            # We need a quaternion that represents "Pointing Left".
+            # If we assume the rig is standard, the Global Rotation of the hand in T-Pose is...
+            # It depends on the bone roll.
+            
+            # Let's stick to the Local conversion which is mathematically sound:
+            # bones["hand_fk.L"] = Inv(Forearm_Global) * Hand_Global
+            # We just need Hand_Global to be correct.
+            # Hand_Global should be: The orientation of the user's hand, mapped to character.
+            # User Right Hand -> Character Left Hand.
+            # We need to mirror the basis.
+            # User Right: X, Y, Z.
+            # Character Left: -X, Y, Z? (Mirror X)
+            
+            # Let's try a simple mapping first:
+            # Use the q_delta approach.
+            # q_hand_L_global = q_delta * q_forearm_L_global (approx)
+            # No, that assumes hand follows forearm exactly plus delta.
+            
+            # Let's go with:
+            # 1. Calculate User Right Hand Rotation (Absolute)
+            # 2. Calculate User Right Forearm Rotation (Absolute)
+            # 3. Calculate Local Rotation (Wrist relative to Forearm)
+            # 4. Apply this Local Rotation to Character Left Hand.
+            
+            # User Right Forearm Global
+            q_u_forearm_global = calc_global_rot(pose_lm, 14, 16, "right_forearm")
+            
+            # User Right Hand Global
+            q_u_hand_global = self.calculate_basis_rotation(right_hand_lm[0], right_hand_lm[9], right_hand_lm[17])
+            
+            # User Wrist Local (Hand relative to Forearm)
+            q_wrist_local = self.multiply_quaternions(self.invert_quaternion(q_u_forearm_global), q_u_hand_global)
+            
+            # Apply to Character Left Hand
+            # Since it's mirrored, we might need to invert some axes.
+            # But usually, "Bend Up" is "Bend Up" on both sides.
+            # "Twist In" is "Twist In".
+            # So the Local Rotation might be directly applicable!
+            
+            bones["hand_fk.L"] = q_wrist_local.tolist()
+            
+            # Calculate Palm Normal (Z-axis of the Hand Basis)
+            # q_hand_L_global is [w, x, y, z]
+            # Scipy expects [x, y, z, w]
+            r_hand = R.from_quat([q_hand_L_global[1], q_hand_L_global[2], q_hand_L_global[3], q_hand_L_global[0]])
+            # In our basis, Z is Normal.
+            # Invert to make fingers curl toward palm (not away)
+            palm_normal = -r_hand.apply([0, 0, 1])
             
             # Fingers
-            solve_finger_chain(right_hand_lm, "thumb", [1, 2, 3, 4], q_hand_L_global, "left")
-            solve_finger_chain(right_hand_lm, "f_index", [5, 6, 7, 8], q_hand_L_global, "left")
-            solve_finger_chain(right_hand_lm, "f_middle", [9, 10, 11, 12], q_hand_L_global, "left")
-            solve_finger_chain(right_hand_lm, "f_ring", [13, 14, 15, 16], q_hand_L_global, "left")
-            solve_finger_chain(right_hand_lm, "f_pinky", [17, 18, 19, 20], q_hand_L_global, "left")
+            solve_finger_chain(right_hand_lm, "thumb", [1, 2, 3, 4], q_hand_L_global, "left", palm_normal)
+            solve_finger_chain(right_hand_lm, "f_index", [5, 6, 7, 8], q_hand_L_global, "left", palm_normal)
+            solve_finger_chain(right_hand_lm, "f_middle", [9, 10, 11, 12], q_hand_L_global, "left", palm_normal)
+            solve_finger_chain(right_hand_lm, "f_ring", [13, 14, 15, 16], q_hand_L_global, "left", palm_normal)
+            solve_finger_chain(right_hand_lm, "f_pinky", [17, 18, 19, 20], q_hand_L_global, "left", palm_normal)
             
         # Right Hand (Character) <- Left Hand (User)
         if left_hand_lm:
-            # Calculate Hand Global Rotation (Wrist -> Middle MCP)
-            q_hand_R_global = calc_global_rot(left_hand_lm, 0, 9, "left_forearm")
-            bones["hand_fk.R"] = self.multiply_quaternions(self.invert_quaternion(q_forearm_R_global), q_hand_R_global).tolist()
+            # User Left Forearm Global
+            q_u_forearm_global = calc_global_rot(pose_lm, 13, 15, "left_forearm")
+            
+            # User Left Hand Global
+            q_hand_R_global = self.calculate_basis_rotation(left_hand_lm[0], left_hand_lm[9], left_hand_lm[17])
+            
+            # User Wrist Local
+            q_wrist_local = self.multiply_quaternions(self.invert_quaternion(q_u_forearm_global), q_hand_R_global)
+            
+            bones["hand_fk.R"] = q_wrist_local.tolist()
+            
+            # Calculate Palm Normal
+            r_hand = R.from_quat([q_hand_R_global[1], q_hand_R_global[2], q_hand_R_global[3], q_hand_R_global[0]])
+            # Invert to make fingers curl toward palm (not away)
+            palm_normal = -r_hand.apply([0, 0, 1])
             
             # Fingers
-            solve_finger_chain(left_hand_lm, "thumb", [1, 2, 3, 4], q_hand_R_global, "right")
-            solve_finger_chain(left_hand_lm, "f_index", [5, 6, 7, 8], q_hand_R_global, "right")
-            solve_finger_chain(left_hand_lm, "f_middle", [9, 10, 11, 12], q_hand_R_global, "right")
-            solve_finger_chain(left_hand_lm, "f_ring", [13, 14, 15, 16], q_hand_R_global, "right")
-            solve_finger_chain(left_hand_lm, "f_pinky", [17, 18, 19, 20], q_hand_R_global, "right")
+            solve_finger_chain(left_hand_lm, "thumb", [1, 2, 3, 4], q_hand_R_global, "right", palm_normal)
+            solve_finger_chain(left_hand_lm, "f_index", [5, 6, 7, 8], q_hand_R_global, "right", palm_normal)
+            solve_finger_chain(left_hand_lm, "f_middle", [9, 10, 11, 12], q_hand_R_global, "right", palm_normal)
+            solve_finger_chain(left_hand_lm, "f_ring", [13, 14, 15, 16], q_hand_R_global, "right", palm_normal)
+            solve_finger_chain(left_hand_lm, "f_pinky", [17, 18, 19, 20], q_hand_R_global, "right", palm_normal)
 
 
         # --- 5. IK TARGETS (Hybrid Mode) ---
