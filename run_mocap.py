@@ -31,7 +31,7 @@ def main():
             # Check if we have pose landmarks
             has_pose = results.pose_landmarks is not None
                 
-            # Display Status
+            # Mostrar Estado
             if not calibrated:
                 if start_time is None:
                     cv2.putText(image, "Press 't' to Calibrate", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)

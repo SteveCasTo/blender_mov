@@ -4,10 +4,9 @@ from src.smoothing import MultiChannelSmoother
 
 class PoseSolver:
     def __init__(self):
-        # Define the standard T-Pose vectors for a human skeleton in Blender's coordinate system (Z-up, Y-forward)
-        # This assumes the character is facing -Y or +Y? Usually characters face -Y in Blender (Front Orthographic).
-        # Let's assume standard Rigify/Mixamo:
-        # T-Pose: Arms along X axis, Legs along -Z axis, Spine along +Z axis.
+        # Definir los vectores estándar de Pose en T para un esqueleto humano en el sistema de coordenadas de Blender (Z-arriba, Y-adelante)
+        # Asumimos Rigify/Mixamo estándar:
+        # Pose en T: Brazos a lo largo del eje X, Piernas a lo largo del eje -Z, Columna a lo largo del eje +Z.
         
         self.rest_vectors = {
             "spine": np.array([0, 0, 1]),      # Up
@@ -24,23 +23,23 @@ class PoseSolver:
         self.rest_hand_basis = {}
         self.initial_hip_pos = None
         self.initial_hip_pos = None
-        # Smoothing / continuity state for yaw to avoid flips and sudden jumps
+        # Suavizado / continuidad para el giro (yaw) para evitar saltos bruscos
         self.torso_yaw_smoothed = 0.0
         self.pelvis_yaw_smoothed = 0.0
         self.prev_torso_raw = None
         self.prev_pelvis_raw = None
-        # smoothing coefficient (0..1), higher = more responsive
+        # coeficiente de suavizado (0..1), mayor = más sensible
         self.yaw_smoothing_alpha = 0.25
         
-        # Initialize OneEuroFilter for all bones
-        # min_cutoff=1.0: Filters out jitter > 1Hz when still
-        # beta=0.5: Reduces latency when moving fast
+        # Inicializar OneEuroFilter para todos los huesos
+        # min_cutoff=1.0: Filtra temblores > 1Hz cuando está quieto
+        # beta=0.5: Reduce latencia cuando se mueve rápido
         self.smoother = MultiChannelSmoother(min_cutoff=1.0, beta=0.5)
 
     def calibrate(self, landmarks):
         """
-        Captures the current pose as the Rest Pose (T-Pose).
-        Updates self.rest_vectors with the vectors from the current landmarks.
+        Captura la pose actual como la Pose de Descanso (Pose en T).
+        Actualiza self.rest_vectors con los vectores de los puntos clave actuales.
         """
         print("Calibrating... Please stand in T-Pose.")
         
@@ -61,8 +60,8 @@ class PoseSolver:
             end = converted_lm[p_end_idx]
             return self.get_vector(start, end)
 
-        # Update Rest Vectors based on USER'S ACTUAL BODY
-        # Spine
+        # Actualizar Vectores de Descanso basados en el CUERPO REAL DEL USUARIO
+        # Columna
         mid_hip = type('P', (), {})()
         mid_hip.x = (converted_lm[23].x + converted_lm[24].x) / 2
         mid_hip.y = (converted_lm[23].y + converted_lm[24].y) / 2
@@ -75,43 +74,43 @@ class PoseSolver:
         
         self.rest_vectors["spine"] = self.get_vector(mid_hip, mid_shoulder)
         
-        # Neck (Mid-shoulder to Nose)
+        # Cuello (Mitad de hombros a Nariz)
         if len(converted_lm) > 0:
             nose = converted_lm[0]
             self.rest_vectors["neck"] = self.get_vector(mid_shoulder, nose)
 
-        # Arms
+        # Brazos
         self.rest_vectors["left_arm"] = get_calib_vec(11, 13)
         self.rest_vectors["left_forearm"] = get_calib_vec(13, 15)
         self.rest_vectors["right_arm"] = get_calib_vec(12, 14)
         self.rest_vectors["right_forearm"] = get_calib_vec(14, 16)
         
-        # Hands Basis Calibration (if hands are visible)
-        # We need landmarks for hands. The 'landmarks' arg passed to calibrate 
-        # is usually just pose_landmarks. We might not have hand landmarks here 
-        # if the user is just standing in T-Pose without hand tracking active/calibrated.
-        # However, we can approximate using Wrist(15/16), Index(19/20), Pinky(17/18) from POSE landmarks?
-        # MediaPipe Pose has:
-        # 15: Left Wrist, 17: Left Pinky, 19: Left Index
-        # 16: Right Wrist, 18: Right Pinky, 20: Right Index
+        # Calibración de Base de Manos (si las manos son visibles)
+        # Necesitamos puntos clave para las manos. El argumento 'landmarks' pasado a calibrate 
+        # suele ser solo pose_landmarks. Podríamos no tener puntos de manos aquí 
+        # si el usuario solo está en Pose en T sin seguimiento de manos activo/calibrado.
+        # Sin embargo, podemos aproximar usando Muñeca(15/16), Índice(19/20), Meñique(17/18) de los puntos de POSE.
+        # MediaPipe Pose tiene:
+        # 15: Muñeca Izq, 17: Meñique Izq, 19: Índice Izq
+        # 16: Muñeca Der, 18: Meñique Der, 20: Índice Der
         
-        # Left Hand (15, 19, 17) -> Wrist, Index, Pinky
+        # Mano Izquierda (15, 19, 17) -> Muñeca, Índice, Meñique
         self.rest_hand_basis["left"] = self.calculate_basis_rotation(
             converted_lm[15], converted_lm[19], converted_lm[17]
         )
         
-        # Right Hand (16, 20, 18) -> Wrist, Index, Pinky
+        # Mano Derecha (16, 20, 18) -> Muñeca, Índice, Meñique
         self.rest_hand_basis["right"] = self.calculate_basis_rotation(
             converted_lm[16], converted_lm[20], converted_lm[18]
         )
         
-        # Legs
+        # Piernas
         self.rest_vectors["left_up_leg"] = get_calib_vec(23, 25)
         self.rest_vectors["left_leg"] = get_calib_vec(25, 27)
         self.rest_vectors["right_up_leg"] = get_calib_vec(24, 26)
         self.rest_vectors["right_leg"] = get_calib_vec(26, 28)
         
-        # Reset Hip Position
+        # Reiniciar Posición de Cadera
         bx = mid_hip.x
         by = mid_hip.y
         bz = mid_hip.z
@@ -121,23 +120,23 @@ class PoseSolver:
 
     def calculate_root_translation(self, landmarks):
         """
-        Calculate the translation of the root (hips) relative to the initial position.
-        Returns [x, y, z] vector in Blender units.
+        Calcula la traslación de la raíz (caderas) relativa a la posición inicial.
+        Devuelve un vector [x, y, z] en unidades de Blender.
         """
-        # Hip Center in MediaPipe
-        # 23: Left Hip, 24: Right Hip
-        # MP Coords: X (0-1), Y (0-1), Z (approx scale)
+        # Centro de la Cadera en MediaPipe
+        # 23: Cadera Izq, 24: Cadera Der
+        # Coordenadas MP: X (0-1), Y (0-1), Z (escala aprox)
         
-        # We need to convert to Blender coords first:
+        # Necesitamos convertir a coordenadas de Blender primero:
         # Blender X = MP X
         # Blender Y = MP Z
         # Blender Z = -MP Y
         
-        # Get raw MP coords for hips
+        # Obtener coordenadas MP crudas para caderas
         l_hip = landmarks[23]
         r_hip = landmarks[24]
         
-        # Average to get center
+        # Promediar para obtener el centro
         cx = (l_hip.x + r_hip.x) / 2
         cy = (l_hip.y + r_hip.y) / 2
         cz = (l_hip.z + r_hip.z) / 2
@@ -155,23 +154,23 @@ class PoseSolver:
             self.initial_hip_pos = current_pos
             return [0.0, 0.0, 0.0]
             
-        # Calculate Delta
+        # Calcular Delta
         delta = current_pos - self.initial_hip_pos
         
-        # Scale Factor
-        # MediaPipe coordinates are small. We need to scale them up for Blender.
-        # A human is ~1.7m tall. In MP, height is ~0.5-0.8 units?
-        # Let's try a scale factor of 2.0 or 3.0 initially.
+        # Factor de Escala
+        # Las coordenadas de MediaPipe son pequeñas. Necesitamos escalarlas para Blender.
+        # Un humano mide ~1.7m. En MP, la altura es ~0.5-0.8 unidades?
+        # Probemos un factor de escala de 2.0 o 3.0 inicialmente.
         SCALE = 3.0
         
-        # Invert X because MP is mirrored?
-        # Usually webcam is mirrored. If user moves left, image moves right.
-        # Blender X+ is Right.
-        # Let's keep X as is for now, might need -X.
+        # ¿Invertir X porque MP está espejado?
+        # Usualmente la webcam está espejada. Si el usuario se mueve a la izquierda, la imagen se mueve a la derecha.
+        # Blender X+ es Derecha.
+        # Dejemos X como está por ahora, podría necesitar -X.
         
         translation = delta * SCALE
         
-        # We might want to zero out Y (Forward/Back) if depth is noisy
+        # Podríamos querer poner a cero Y (Adelante/Atrás) si la profundidad es ruidosa
         # translation[1] = 0 
         
         return translation.tolist()
@@ -198,76 +197,55 @@ class PoseSolver:
             return np.array([1, 0, 0, 0]) # w, x, y, z
         
         if np.allclose(u, -v):
-            # 180 degree rotation. Axis can be any vector orthogonal to u.
-            # This is a rare edge case in mocap (bones don't flip 180 instantly).
             return np.array([0, 1, 0, 0])
 
-        # Cross product gives the axis of rotation
         axis = np.cross(u, v)
         
-        # Dot product gives cosine of angle
         dot = np.dot(u, v)
-        
-        # Calculate angle
-        # dot = cos(theta)
-        # We need half angle for quaternion
-        # A stable way to compute the quaternion is:
-        # q = [sqrt(2(1+dot)), axis_x, axis_y, axis_z] normalized? 
-        # Or standard:
-        # theta = arccos(dot)
-        # axis = axis / sin(theta)
-        
-        # Using scipy for robustness, but explaining the math:
-        # We want R such that R * u = v
-        
-        # Manual implementation as requested:
-        # q_w = sqrt(|u|^2 * |v|^2) + dot(u, v)
-        # q_xyz = cross(u, v)
         
         q_xyz = axis
         q_w = np.sqrt(np.linalg.norm(u)**2 * np.linalg.norm(v)**2) + dot
         
-        # Normalize quaternion
         q = np.array([q_w, q_xyz[0], q_xyz[1], q_xyz[2]])
         return self.normalize(q)
 
     def calculate_basis_rotation(self, origin, p_primary, p_secondary):
         """
-        Calculate rotation from 3 points defining a plane.
-        origin: Wrist
-        p_primary: Index or Middle MCP (defines Forward vector)
-        p_secondary: Pinky MCP (defines Plane)
+        Calcular rotación desde 3 puntos que definen un plano.
+        origin: Muñeca
+        p_primary: Índice o Medio MCP (define vector Adelante)
+        p_secondary: Meñique MCP (define Plano)
         
-        Returns: Quaternion [w, x, y, z] representing the orientation of this basis
+        Devuelve: Cuaternión [w, x, y, z] representando la orientación de esta base
         """
         v_forward = self.normalize(self.get_vector(origin, p_primary))
         v_temp = self.normalize(self.get_vector(origin, p_secondary))
         
-        # Calculate Normal (Up/Down)
+        # Calcular Normal (Arriba/Abajo)
         v_normal = self.normalize(np.cross(v_forward, v_temp))
         
-        # Calculate Right vector
-        # Ensure right-handed coordinate system: Cross(Y, Z) = X
-        # v_forward is Y-axis, v_normal is Z-axis (roughly)
+        # Calcular vector Derecha
+        # Asegurar sistema de coordenadas de mano derecha: Cross(Y, Z) = X
+        # v_forward es eje Y, v_normal es eje Z (aprox)
         v_right = self.normalize(np.cross(v_forward, v_normal))
         
-        # Re-calculate normal to ensure orthogonality
+        # Recalcular normal para asegurar ortogonalidad
         v_normal = np.cross(v_right, v_forward)
         
-        # Construct Rotation Matrix (Columns: X, Y, Z)
+        # Construir Matriz de Rotación (Columnas: X, Y, Z)
         matrix = np.column_stack((v_right, v_forward, v_normal))
         
-        # Check determinant to avoid "Non-positive determinant" error
+        # Verificar determinante para evitar error "Non-positive determinant"
         if np.linalg.det(matrix) < 0:
-            # Flip one axis to make it right-handed (e.g., Normal)
+            # Voltear un eje para hacerlo de mano derecha (ej. Normal)
             v_normal = -v_normal
             matrix = np.column_stack((v_right, v_forward, v_normal))
         
-        # Convert to Quaternion
+        # Convertir a Cuaternión
         try:
             r = R.from_matrix(matrix)
             q = r.as_quat()
-            # Scipy returns [x, y, z, w], we need [w, x, y, z]
+            # Scipy devuelve [x, y, z, w], necesitamos [w, x, y, z]
             return np.array([q[3], q[0], q[1], q[2]])
         except ValueError:
             return np.array([1, 0, 0, 0])
@@ -521,8 +499,8 @@ class PoseSolver:
 
     def solve(self, results):
         """
-        Input: MediaPipe Holistic results object (contains pose_landmarks, left_hand_landmarks, right_hand_landmarks)
-        Output: Dictionary of bone names to [w, x, y, z] (Rotations) or [x, y, z] (Positions)
+        Entrada: Objeto de resultados de MediaPipe Holistic (contiene pose_landmarks, left_hand_landmarks, right_hand_landmarks)
+        Salida: Diccionario de nombres de huesos a [w, x, y, z] (Rotaciones) o [x, y, z] (Posiciones)
         """
         
         if not results.pose_landmarks:
@@ -531,20 +509,20 @@ class PoseSolver:
         # Helper class for coordinate conversion
         class Point:
             def __init__(self, x, y, z):
-                # MediaPipe: X(0-1 left-right), Y(0-1 top-bottom), Z(depth)
-                # Blender: X(left-right), Y(back-front), Z(down-up)
-                self.x = x      # No inversion
-                # DAMPEN DEPTH (Z in MP -> Y in Blender)
-                # We multiply by 0.5 to reduce the "leaning" effect caused by exaggerated depth estimation.
+                # MediaPipe: X(0-1 izq-der), Y(0-1 arriba-abajo), Z(profundidad)
+                # Blender: X(izq-der), Y(atrás-adelante), Z(abajo-arriba)
+                self.x = x      # Sin inversión
+                # AMORTIGUAR PROFUNDIDAD (Z en MP -> Y en Blender)
+                # Multiplicamos por 0.5 para reducir el efecto de "inclinación" causado por la estimación de profundidad exagerada.
                 self.y = z * 0.5 
-                self.z = -y     # Height becomes Z (up/down)
+                self.z = -y     # Altura se convierte en Z (arriba/abajo)
 
-        # 1. Convert POSE landmarks
+        # 1. Convertir puntos clave de POSE
         pose_lm = []
         for lm in results.pose_landmarks.landmark:
             pose_lm.append(Point(lm.x, lm.y, lm.z))
 
-        # 2. Convert HAND landmarks (if available)
+        # 2. Convertir puntos clave de MANOS (si están disponibles)
         left_hand_lm = []
         if results.left_hand_landmarks:
             for lm in results.left_hand_landmarks.landmark:
@@ -557,7 +535,7 @@ class PoseSolver:
 
         bones = {}
         
-        # Helper to get GLOBAL rotation for a specific bone (Generic)
+        # Helper para obtener rotación GLOBAL para un hueso específico (Genérico)
         def calc_global_rot(landmarks_list, p_start_idx, p_end_idx, rest_vec_name):
             if not landmarks_list or p_start_idx >= len(landmarks_list) or p_end_idx >= len(landmarks_list):
                 return np.array([1, 0, 0, 0])
@@ -569,18 +547,18 @@ class PoseSolver:
             if rest_vec_name in self.rest_vectors:
                 rest_vec = self.rest_vectors[rest_vec_name]
             else:
-                # Fallback defaults
+                # Valores predeterminados de respaldo
                 if "left" in rest_vec_name: rest_vec = np.array([1, 0, 0])
                 elif "right" in rest_vec_name: rest_vec = np.array([-1, 0, 0])
                 else: rest_vec = np.array([0, 0, 1])
                 
             return self.rotation_between_vectors(rest_vec, current_vec)
 
-        # --- 1. SPINE & HEAD (FK) ---
-        # Uses POSE landmarks
+        # --- 1. COLUMNA Y CABEZA (FK) ---
+        # Usa puntos clave de POSE
         
-        # Calculate mid points for body structure
-        # CRITICAL: These should be stable even when head moves
+        # Calcular puntos medios para estructura corporal
+        # CRÍTICO: Estos deben ser estables incluso cuando la cabeza se mueve
         mid_hip = type('P', (), {})()
         mid_hip.x = (pose_lm[23].x + pose_lm[24].x) / 2
         mid_hip.y = (pose_lm[23].y + pose_lm[24].y) / 2
@@ -591,37 +569,37 @@ class PoseSolver:
         mid_shoulder.y = (pose_lm[11].y + pose_lm[12].y) / 2
         mid_shoulder.z = (pose_lm[11].z + pose_lm[12].z) / 2
         
-        # --- TORSO (Main Body Rotation) ---
-        # Vector from Hips to Shoulders (pitch/tilt of the torso)
+        # --- TORSO (Rotación Principal del Cuerpo) ---
+        # Vector de Caderas a Hombros (inclinación del torso)
         spine_vec = self.get_vector(mid_hip, mid_shoulder)
         
-        # Calculate torso pitch (lean forward/back) from hip->shoulder vector
-        # IMPORTANT: This should NOT be affected by head movement
+        # Calcular inclinación del torso (adelante/atrás) desde vector cadera->hombro
+        # IMPORTANTE: Esto NO debe verse afectado por el movimiento de la cabeza
         q_torso_pitch = self.rotation_between_vectors(np.array([0, 0, 1]), spine_vec)
         
-        # --- TORSO YAW (rotation around vertical axis when turning) ---
-        # Use shoulder line orientation to detect body rotation
-        # Left shoulder (11) and Right shoulder (12)
+        # --- GIRO DEL TORSO (rotación alrededor del eje vertical al girar) ---
+        # Usar orientación de línea de hombros para detectar rotación del cuerpo
+        # Hombro Izquierdo (11) y Hombro Derecho (12)
         shoulder_vec = self.get_vector(pose_lm[11], pose_lm[12])
         
-        # STABILITY CHECK: Validate shoulder vector is reasonable
+        # VERIFICACIÓN DE ESTABILIDAD: Validar que el vector de hombros sea razonable
         shoulder_length = np.linalg.norm(shoulder_vec)
         
         # DEBUG: Print shoulder info to detect asymmetry
         print(f"Shoulder vec: [{shoulder_vec[0]:.3f}, {shoulder_vec[1]:.3f}, {shoulder_vec[2]:.3f}], length: {shoulder_length:.3f}")
         
-        # Only calculate yaw if shoulder detection is stable
-        if shoulder_length > 0.05 and shoulder_length < 1.5:  # Relaxed bounds
-            # MIRROR MODE: Invert forward component so user right = character left
-            shoulder_forward = -shoulder_vec[1]  # INVERTED Y component for mirror
+        # Solo calcular giro si la detección de hombros es estable
+        if shoulder_length > 0.05 and shoulder_length < 1.5:  # Límites relajados
+            # MODO ESPEJO: Invertir componente adelante para que derecha usuario = izquierda personaje
+            shoulder_forward = -shoulder_vec[1]  # Componente Y INVERTIDO para espejo
             shoulder_lateral = shoulder_vec[0]   # X component (left/right)
 
-            # Raw yaw angle from current shoulder orientation
+            # Ángulo de giro crudo desde orientación actual de hombros
             yaw_angle_raw = np.arctan2(shoulder_forward, shoulder_lateral)
-            # Add fixed 180° offset if your rig requires it
-            yaw_raw = yaw_angle_raw + (np.pi / 2) * 2  # +180° offset for T-pose neutral
+            # Agregar offset fijo de 180° si tu rig lo requiere
+            yaw_raw = yaw_angle_raw + (np.pi / 2) * 2  # +180° offset para neutral en T-pose
 
-            # Angle continuity (unwrap) to avoid flips around the ±π boundary
+            # Continuidad de ángulo (desenvolver) para evitar saltos alrededor del límite ±π
             if self.prev_torso_raw is not None:
                 # bring yaw_raw close to prev by adding/subtracting 2π if needed
                 diff = yaw_raw - self.prev_torso_raw
@@ -629,24 +607,24 @@ class PoseSolver:
                     yaw_raw -= 2 * np.pi
                 elif diff < -np.pi:
                     yaw_raw += 2 * np.pi
-            # initialize prev if needed
+            # inicializar prev si es necesario
             self.prev_torso_raw = yaw_raw if self.prev_torso_raw is None else self.prev_torso_raw
 
-            # Exponential smoothing (IIR) on yaw angle to avoid sudden jumps
+            # Suavizado exponencial (IIR) en ángulo de giro para evitar saltos bruscos
             self.torso_yaw_smoothed = (
                 self.yaw_smoothing_alpha * yaw_raw
                 + (1.0 - self.yaw_smoothing_alpha) * self.torso_yaw_smoothed
             )
 
             yaw_angle = self.torso_yaw_smoothed
-            # keep prev raw aligned to smoothed value for next unwrap
+            # mantener prev raw alineado al valor suavizado para el siguiente desempaquetado
             self.prev_torso_raw = yaw_raw
         else:
-            # Shoulders unstable - keep last smoothed value (freeze)
+            # Hombros inestables - mantener último valor suavizado (congelar)
             yaw_angle = self.torso_yaw_smoothed
         
-        # Create yaw quaternion (rotation around Z-axis)
-        # Quaternion for Z-axis rotation: [cos(θ/2), 0, 0, sin(θ/2)]
+        # Crear cuaternión de giro (rotación alrededor del eje Z)
+        # Cuaternión para rotación en eje Z: [cos(θ/2), 0, 0, sin(θ/2)]
         q_torso_yaw = np.array([
             np.cos(yaw_angle / 2),
             0,
@@ -654,16 +632,16 @@ class PoseSolver:
             np.sin(yaw_angle / 2)
         ])
         
-        # Combine pitch and yaw for total torso rotation
-        # Apply yaw first, then pitch (order matters for gimbal-free rotation)
+        # Combinar inclinación y giro para rotación total del torso
+        # Aplicar giro primero, luego inclinación (el orden importa)
         q_torso_global = self.multiply_quaternions(q_torso_yaw, q_torso_pitch)
         
-        # Apply to "torso" bone (Root of the spine chain)
+        # Aplicar a hueso "torso" (Raíz de la cadena de la columna)
         bones["torso_rot"] = q_torso_global.tolist()
         
-        # --- SPINE CURVATURE ---
-        # Apply a fraction of the torso rotation to the spine bones to create a curve.
-        # Distribute yaw rotation to spine for natural twisting
+        # --- CURVATURA DE COLUMNA ---
+        # Aplicar una fracción de la rotación del torso a los huesos de la columna para crear una curva.
+        # Distribuir rotación de giro a la columna para torsión natural
         q_spine_yaw = self.scale_quaternion_rotation(q_torso_yaw, 0.3)  # 30% of yaw
         q_spine_pitch = self.scale_quaternion_rotation(q_torso_pitch, 0.2)  # 20% of pitch
         q_spine_curve = self.multiply_quaternions(q_spine_yaw, q_spine_pitch)
@@ -671,30 +649,30 @@ class PoseSolver:
         bones["spine_fk"] = q_spine_curve.tolist()
         bones["spine_fk.001"] = q_spine_curve.tolist()
         
-        # --- PELVIS/HIPS (for legs anchor) ---
-        # The pelvis should have its own rotation based on HIP orientation, not torso
-        # This is critical: legs are attached to pelvis, not spine
+        # --- PELVIS/CADERAS (para anclaje de piernas) ---
+        # La pelvis debe tener su propia rotación basada en orientación de CADERA, no torso
+        # Esto es crítico: las piernas están unidas a la pelvis, no a la columna
         
-        # Calculate pelvis yaw from hip line orientation
-        hip_vec = self.get_vector(pose_lm[23], pose_lm[24])  # Left hip → Right hip
+        # Calcular giro de pelvis desde orientación de línea de cadera
+        hip_vec = self.get_vector(pose_lm[23], pose_lm[24])  # Cadera Izq -> Cadera Der
         
-        # STABILITY CHECK: Validate hip vector is reasonable
+        # VERIFICACIÓN DE ESTABILIDAD: Validar que el vector de cadera sea razonable
         hip_length = np.linalg.norm(hip_vec)
         
         # DEBUG: Print hip info
         print(f"Hip vec: [{hip_vec[0]:.3f}, {hip_vec[1]:.3f}, {hip_vec[2]:.3f}], length: {hip_length:.3f}")
         
-        # Only calculate pelvis yaw if hip detection is stable
-        if hip_length > 0.05 and hip_length < 1.5:  # Relaxed bounds (same as shoulders)
-            # MIRROR MODE: Invert forward component
-            hip_forward = -hip_vec[1]  # INVERTED Y component for mirror
-            hip_lateral = hip_vec[0]  # X component (left/right)
+        # Solo calcular giro de pelvis si la detección de cadera es estable
+        if hip_length > 0.05 and hip_length < 1.5:  # Límites relajados (igual que hombros)
+            # MODO ESPEJO: Invertir componente adelante
+            hip_forward = -hip_vec[1]  # Componente Y INVERTIDO para espejo
+            hip_lateral = hip_vec[0]  # Componente X (izq/der)
 
-            # Raw pelvis yaw
+            # Giro crudo de pelvis
             pelvis_yaw_raw = np.arctan2(hip_forward, hip_lateral)
-            pelvis_yaw_raw = pelvis_yaw_raw + (np.pi / 2) * 2  # Same 180° offset as torso
+            pelvis_yaw_raw = pelvis_yaw_raw + (np.pi / 2) * 2  # Mismo offset de 180° que el torso
 
-            # Unwrap relative to previous pelvis raw to keep continuity
+            # Desenvolver relativo al previo pelvis raw para mantener continuidad
             if self.prev_pelvis_raw is not None:
                 diff_p = pelvis_yaw_raw - self.prev_pelvis_raw
                 if diff_p > np.pi:
@@ -702,7 +680,7 @@ class PoseSolver:
                 elif diff_p < -np.pi:
                     pelvis_yaw_raw += 2 * np.pi
 
-            # Exponential smoothing for pelvis yaw
+            # Suavizado exponencial para giro de pelvis
             self.pelvis_yaw_smoothed = (
                 self.yaw_smoothing_alpha * pelvis_yaw_raw
                 + (1.0 - self.yaw_smoothing_alpha) * self.pelvis_yaw_smoothed
@@ -710,10 +688,10 @@ class PoseSolver:
             pelvis_yaw = self.pelvis_yaw_smoothed
             self.prev_pelvis_raw = pelvis_yaw_raw
         else:
-            # Hips unstable - keep last smoothed value (freeze)
+            # Caderas inestables - mantener último valor suavizado (congelar)
             pelvis_yaw = self.pelvis_yaw_smoothed
         
-        # Create pelvis yaw quaternion
+        # Crear cuaternión de giro de pelvis
         q_pelvis_yaw = np.array([
             np.cos(pelvis_yaw / 2),
             0,
@@ -721,53 +699,53 @@ class PoseSolver:
             np.sin(pelvis_yaw / 2)
         ])
         
-        # Pelvis should have minimal pitch (hips don't tilt much)
-        # Use identity quaternion or very small fraction of torso pitch
-        q_pelvis_global = q_pelvis_yaw  # Pelvis only rotates (yaw), minimal tilt
+        # La pelvis debe tener inclinación mínima (las caderas no se inclinan mucho)
+        # Usar cuaternión identidad o fracción muy pequeña de inclinación del torso
+        q_pelvis_global = q_pelvis_yaw  # Pelvis solo rota (giro), inclinación mínima
 
-        # --- HEAD & NECK ---
-        # Calculate Head and Neck Rotation with proper pitch (up/down) handling
-        # MIRROR MODE: User movements are mirrored (User Left = Character Right)
+        # --- CABEZA Y CUELLO ---
+        # Calcular Rotación de Cabeza y Cuello con manejo adecuado de inclinación (arriba/abajo)
+        # MODO ESPEJO: Movimientos del usuario espejados (Izq Usuario = Der Personaje)
         
         if len(pose_lm) > 0:
-            # Use NOSE (moves more than ears when turning head)
+            # Usar NARIZ (se mueve más que las orejas al girar la cabeza)
             nose = pose_lm[0]
             l_ear = pose_lm[7]
             r_ear = pose_lm[8]
             l_eye = pose_lm[2]
             r_eye = pose_lm[5]
             
-            # Mid-ear for reference
+            # Mitad de orejas para referencia
             mid_ear = type('P', (), {})()
             mid_ear.x = (l_ear.x + r_ear.x) / 2
             mid_ear.y = (l_ear.y + r_ear.y) / 2
             mid_ear.z = (l_ear.z + r_ear.z) / 2
             
-            # Mid-eye for better pitch detection
+            # Mitad de ojos para mejor detección de inclinación
             mid_eye = type('P', (), {})()
             mid_eye.x = (l_eye.x + r_eye.x) / 2
             mid_eye.y = (l_eye.y + r_eye.y) / 2
             mid_eye.z = (l_eye.z + r_eye.z) / 2
             
-            # --- DETECT PITCH (up/down tilt) ---
-            # When looking down: nose.z < eye.z (negative pitch)
-            # When looking up: nose.z > eye.z (positive pitch)
-            pitch_raw = (nose.z - mid_eye.z) * 8.0  # Reduced sensitivity
+            # --- DETECTAR INCLINACIÓN (tilt arriba/abajo) ---
+            # Al mirar abajo: nose.z < eye.z (inclinación negativa)
+            # Al mirar arriba: nose.z > eye.z (inclinación positiva)
+            pitch_raw = (nose.z - mid_eye.z) * 8.0  # Sensibilidad reducida
             
-            # LIMIT pitch to realistic range: -30° to +20°
+            # LIMITAR inclinación a rango realista: -30° a +20°
             pitch_amount = np.clip(pitch_raw, -30.0, 20.0)
             
-            # --- NECK ROTATION (absorbs part of pitch) ---
-            # Base neck vector: shoulder to mid_ear
+            # --- ROTACIÓN DE CUELLO (absorbe parte de la inclinación) ---
+            # Vector base de cuello: hombro a mitad de orejas
             neck_base_vec = self.get_vector(mid_shoulder, mid_ear)
             
-            # Apply pitch to neck (neck tilts forward/back when looking down/up)
-            # Increase neck contribution slightly so neck is visible when looking down
+            # Aplicar inclinación al cuello (cuello se inclina adelante/atrás al mirar abajo/arriba)
+            # Aumentar contribución del cuello ligeramente para que sea visible al mirar abajo
             neck_pitch_factor = pitch_amount * 0.35
 
-            # Adjust neck vector with pitch
-            # When pitch is negative (looking down), tilt neck forward (increase Y)
-            # Use a slightly larger multiplier to make the neck flex visibly
+            # Ajustar vector de cuello con inclinación
+            # Cuando la inclinación es negativa (mirar abajo), inclinar cuello adelante (aumentar Y)
+            # Usar un multiplicador ligeramente mayor para hacer que el cuello se flexione visiblemente
             neck_vec = np.array([
                 neck_base_vec[0],
                 neck_base_vec[1] + neck_pitch_factor * 0.05,
@@ -775,28 +753,28 @@ class PoseSolver:
             ])
             neck_vec = self.normalize(neck_vec)
             
-            # Calculate neck rotation
+            # Calcular rotación de cuello
             q_neck_global = self.rotation_between_vectors(np.array([0, 0, 1]), neck_vec)
             
-            # Neck is child of torso
+            # Cuello es hijo del torso
             q_neck_local = self.multiply_quaternions(self.invert_quaternion(q_torso_global), q_neck_global)
             bones["neck"] = q_neck_local.tolist()
             
-            # --- HEAD ROTATION (child of neck, absorbs remaining pitch) ---
-            # Calculate YAW (left/right): Use horizontal position of nose relative to face center
-            # MIRROR MODE: Invert X for mirror effect
-            yaw_raw = -(nose.x - mid_eye.x) * 50.0  # Reduced from 70.0
+            # --- ROTACIÓN DE CABEZA (hija del cuello, absorbe inclinación restante) ---
+            # Calcular GIRO (izq/der): Usar posición horizontal de nariz relativa al centro de la cara
+            # MODO ESPEJO: Invertir X para efecto espejo
+            yaw_raw = -(nose.x - mid_eye.x) * 50.0  # Reducido de 70.0
             yaw_diff = np.clip(yaw_raw, -80.0, 80.0)  # Limit left/right rotation
             
-            # Build a physical target vector from neck to nose (this represents where the head should look)
+            # Construir un vector objetivo físico de cuello a nariz (esto representa dónde debería mirar la cabeza)
             head_target_vec = self.get_vector(mid_ear, nose)
-            # Mirror X for mirror mode (we used mirrored yaw previously)
+            # Espejar X para modo espejo (usamos giro espejado previamente)
             head_target_vec[0] = -head_target_vec[0]
             
-            # CRITICAL FIX (revised): rotate the target so neutral = looking straight ahead.
-            # Previous mapping rotated the opposite direction; use forward rotation instead.
-            # Mapping: Original: [X, Y_forward, Z_up] -> Corrected: [X, Z, -Y]
-            # This rotates the forward component into the up axis in the forward direction.
+            # ARREGLO CRÍTICO (revisado): rotar el objetivo para que neutral = mirar al frente.
+            # Mapeo anterior rotaba en dirección opuesta; usar rotación hacia adelante en su lugar.
+            # Mapeo: Original: [X, Y_adelante, Z_arriba] -> Corregido: [X, Z, -Y]
+            # Esto rota el componente adelante hacia el eje arriba en la dirección adelante.
             head_target_corrected = np.array([
                 head_target_vec[0],      # Keep X (left/right) as-is
                 head_target_vec[2],      # Y becomes Z (use up component as forward)
@@ -804,14 +782,11 @@ class PoseSolver:
             ])
             head_target_corrected = self.normalize(head_target_corrected)
 
-            # Debug to confirm correction direction
-            # print(f"DBG Head corrected vec: {head_target_corrected}")
-
-            # Calculate head rotation in global space aligning head +Z to the target vector
+            # Calcular rotación global de cabeza alineando cabeza +Z al vector objetivo
             q_head_global = self.rotation_between_vectors(np.array([0, 0, 1]), head_target_corrected)
             
-            # Head is child of NECK
-            # Calculate local rotation relative to neck
+            # Cabeza es hija de CUELLO
+            # Calcular rotación local relativa al cuello
             q_head_local = self.multiply_quaternions(self.invert_quaternion(q_neck_global), q_head_global)
 
             bones["head_fk"] = q_head_local.tolist()
@@ -820,15 +795,15 @@ class PoseSolver:
             bones["neck"] = [1, 0, 0, 0]
             q_head_global = q_torso_global # Fallback
 
-        # --- 2. ARMS (FK) ---
-        # MIRROR MODE: User Left -> Character Right, User Right -> Character Left
+        # --- 2. BRAZOS (FK) ---
+        # MODO ESPEJO: Izquierda Usuario -> Derecha Personaje, Derecha Usuario -> Izquierda Personaje
         
-        # We need to use q_torso_global as the parent rotation for the arms
-        # because the arms are attached to the torso (via shoulder/clavicle).
-        q_spine_global = q_torso_global # Alias for compatibility with existing arm logic
+        # Necesitamos usar q_torso_global como la rotación padre para los brazos
+        # porque los brazos están unidos al torso (vía hombro/clavícula).
+        q_spine_global = q_torso_global # Alias para compatibilidad con lógica de brazos existente
         
-        # Left Arm (Character) <- Right Arm (User)
-        # Landmarks: 12 (R Shoulder), 14 (R Elbow), 16 (R Wrist)
+        # Brazo Izquierdo (Personaje) <- Brazo Derecho (Usuario)
+        # Puntos Clave: 12 (Hombro Der), 14 (Codo Der), 16 (Muñeca Der)
         q_upper_arm_L_global = calc_global_rot(pose_lm, 12, 14, "right_arm")
         q_forearm_L_global = calc_global_rot(pose_lm, 14, 16, "right_forearm")
         
@@ -839,8 +814,8 @@ class PoseSolver:
         q_forearm_L_local = self.multiply_quaternions(q_upper_arm_L_inv, q_forearm_L_global)
         bones["forearm_fk.L"] = q_forearm_L_local.tolist()
         
-        # Right Arm (Character) <- Left Arm (User)
-        # Landmarks: 11 (L Shoulder), 13 (L Elbow), 15 (L Wrist)
+        # Brazo Derecho (Personaje) <- Brazo Izquierdo (Usuario)
+        # Puntos Clave: 11 (Hombro Izq), 13 (Codo Izq), 15 (Muñeca Izq)
         q_upper_arm_R_global = calc_global_rot(pose_lm, 11, 13, "left_arm")
         q_forearm_R_global = calc_global_rot(pose_lm, 13, 15, "left_forearm")
         
@@ -851,15 +826,15 @@ class PoseSolver:
         q_forearm_R_local = self.multiply_quaternions(q_upper_arm_R_inv, q_forearm_R_global)
         bones["forearm_fk.R"] = q_forearm_R_local.tolist()
 
-        # --- 3. LEGS (FK) ---
-        # MIRROR MODE
+        # --- 3. PIERNAS (FK) ---
+        # MODO ESPEJO
         
-        # Left Leg (Character) <- Right Leg (User)
-        # Landmarks: 24 (R Hip), 26 (R Knee), 28 (R Ankle)
+        # Pierna Izquierda (Personaje) <- Pierna Derecha (Usuario)
+        # Puntos Clave: 24 (Cadera Der), 26 (Rodilla Der), 28 (Tobillo Der)
         q_thigh_L_global = calc_global_rot(pose_lm, 24, 26, "right_up_leg")
         q_shin_L_global = calc_global_rot(pose_lm, 26, 28, "right_leg")
         
-        # Use pelvis (pitch only) instead of spine (pitch+yaw) to prevent rotation issues
+        # Usar pelvis (solo inclinación) en lugar de columna (inclinación+giro) para prevenir problemas de rotación
         q_thigh_L_local = self.multiply_quaternions(self.invert_quaternion(q_pelvis_global), q_thigh_L_global)
         bones["thigh_fk.L"] = q_thigh_L_local.tolist()
         
@@ -867,12 +842,12 @@ class PoseSolver:
         q_shin_L_local = self.multiply_quaternions(q_thigh_L_inv, q_shin_L_global)
         bones["shin_fk.L"] = q_shin_L_local.tolist()
         
-        # Right Leg (Character) <- Left Leg (User)
-        # Landmarks: 23 (L Hip), 25 (L Knee), 27 (L Ankle)
+        # Pierna Derecha (Personaje) <- Pierna Izquierda (Usuario)
+        # Puntos Clave: 23 (Cadera Izq), 25 (Rodilla Izq), 27 (Tobillo Izq)
         q_thigh_R_global = calc_global_rot(pose_lm, 23, 25, "left_up_leg")
         q_shin_R_global = calc_global_rot(pose_lm, 25, 27, "left_leg")
         
-        # Use pelvis (pitch only) instead of spine (pitch+yaw) to prevent rotation issues
+        # Usar pelvis (solo inclinación) en lugar de columna (inclinación+giro) para prevenir problemas de rotación
         q_thigh_R_local = self.multiply_quaternions(self.invert_quaternion(q_pelvis_global), q_thigh_R_global)
         bones["thigh_fk.R"] = q_thigh_R_local.tolist()
         
@@ -880,20 +855,20 @@ class PoseSolver:
         q_shin_R_local = self.multiply_quaternions(q_thigh_R_inv, q_shin_R_global)
         bones["shin_fk.R"] = q_shin_R_local.tolist()
 
-        # --- 4. FINGERS (FK) ---
-        # MIRROR MODE
+        # --- 4. DEDOS (FK) ---
+        # MODO ESPEJO
         
         def solve_finger_chain(lm_list, prefix, indices, parent_global_rot, side_name, palm_normal):
             if not lm_list: return
             
-            # Helper to create a Point from coordinates
+            # Helper para crear un Punto desde coordenadas
             class TempPoint:
                 def __init__(self, x, y, z):
                     self.x, self.y, self.z = x, y, z
 
             # 1. Proximal (MCP -> PIP)
-            # Construct a 3rd point to define the plane (Start + Palm Normal)
-            # This forces the finger's "Up" vector to align with the Palm Normal
+            # Construir un 3er punto para definir el plano (Inicio + Normal de Palma)
+            # Esto fuerza al vector "Arriba" del dedo a alinearse con la Normal de la Palma
             start = lm_list[indices[0]]
             p_normal_target = TempPoint(start.x + palm_normal[0], start.y + palm_normal[1], start.z + palm_normal[2])
             
@@ -901,7 +876,7 @@ class PoseSolver:
             q_prox_local = self.multiply_quaternions(self.invert_quaternion(parent_global_rot), q_prox_global)
             bones[f"{prefix}.01.{side_name[0].upper()}"] = q_prox_local.tolist()
             
-            # 2. Intermediate (PIP -> DIP)
+            # 2. Intermedia (PIP -> DIP)
             start = lm_list[indices[1]]
             p_normal_target = TempPoint(start.x + palm_normal[0], start.y + palm_normal[1], start.z + palm_normal[2])
             
@@ -909,7 +884,7 @@ class PoseSolver:
             q_inter_local = self.multiply_quaternions(self.invert_quaternion(q_prox_global), q_inter_global)
             bones[f"{prefix}.02.{side_name[0].upper()}"] = q_inter_local.tolist()
             
-            # 3. Distal (DIP -> Tip)
+            # 3. Distal (DIP -> Punta)
             start = lm_list[indices[2]]
             p_normal_target = TempPoint(start.x + palm_normal[0], start.y + palm_normal[1], start.z + palm_normal[2])
             
@@ -917,10 +892,10 @@ class PoseSolver:
             q_dist_local = self.multiply_quaternions(self.invert_quaternion(q_inter_global), q_dist_global)
             bones[f"{prefix}.03.{side_name[0].upper()}"] = q_dist_local.tolist()
 
-        # Left Hand (Character) <- Right Hand (User)
+        # Mano Izquierda (Personaje) <- Mano Derecha (Usuario)
         if right_hand_lm:
-            # Calculate Hand Global Rotation using 3 points (Wrist, Index, Pinky)
-            # 0: Wrist, 5: Index MCP, 17: Pinky MCP
+            # Calcular Rotación Global de Mano usando 3 puntos (Muñeca, Índice, Meñique)
+            # 0: Muñeca, 5: Índice MCP, 17: Meñique MCP
             q_hand_L_global = self.calculate_basis_rotation(right_hand_lm[0], right_hand_lm[5], right_hand_lm[17])
             
             # Calculate relative rotation from Rest Pose
@@ -1019,57 +994,57 @@ class PoseSolver:
             # 3. Calculate Local Rotation (Wrist relative to Forearm)
             # 4. Apply this Local Rotation to Character Left Hand.
             
-            # User Right Forearm Global
+            # Antebrazo Derecho Usuario Global
             q_u_forearm_global = calc_global_rot(pose_lm, 14, 16, "right_forearm")
             
-            # User Right Hand Global
+            # Mano Derecha Usuario Global
             q_u_hand_global = self.calculate_basis_rotation(right_hand_lm[0], right_hand_lm[9], right_hand_lm[17])
             
-            # User Wrist Local (Hand relative to Forearm)
+            # Muñeca Usuario Local (Mano relativa a Antebrazo)
             q_wrist_local = self.multiply_quaternions(self.invert_quaternion(q_u_forearm_global), q_u_hand_global)
             
-            # Apply to Character Left Hand
-            # Since it's mirrored, we might need to invert some axes.
-            # But usually, "Bend Up" is "Bend Up" on both sides.
-            # "Twist In" is "Twist In".
-            # So the Local Rotation might be directly applicable!
+            # Aplicar a Mano Izquierda Personaje
+            # Dado que es espejado, podríamos necesitar invertir algunos ejes.
+            # Pero usualmente, "Doblar Arriba" es "Doblar Arriba" en ambos lados.
+            # "Girar Adentro" es "Girar Adentro".
+            # ¡Así que la Rotación Local podría ser directamente aplicable!
             
             bones["hand_fk.L"] = q_wrist_local.tolist()
             
-            # Calculate Palm Normal (Z-axis of the Hand Basis)
-            # q_hand_L_global is [w, x, y, z]
-            # Scipy expects [x, y, z, w]
+            # Calcular Normal de Palma (Eje Z de la Base de la Mano)
+            # q_hand_L_global es [w, x, y, z]
+            # Scipy espera [x, y, z, w]
             r_hand = R.from_quat([q_hand_L_global[1], q_hand_L_global[2], q_hand_L_global[3], q_hand_L_global[0]])
-            # In our basis, Z is Normal.
-            # Invert to make fingers curl toward palm (not away)
+            # En nuestra base, Z es Normal.
+            # Invertir para hacer que los dedos se curven hacia la palma (no hacia afuera)
             palm_normal = -r_hand.apply([0, 0, 1])
             
-            # Fingers
+            # Dedos
             solve_finger_chain(right_hand_lm, "thumb", [1, 2, 3, 4], q_hand_L_global, "left", palm_normal)
             solve_finger_chain(right_hand_lm, "f_index", [5, 6, 7, 8], q_hand_L_global, "left", palm_normal)
             solve_finger_chain(right_hand_lm, "f_middle", [9, 10, 11, 12], q_hand_L_global, "left", palm_normal)
             solve_finger_chain(right_hand_lm, "f_ring", [13, 14, 15, 16], q_hand_L_global, "left", palm_normal)
             solve_finger_chain(right_hand_lm, "f_pinky", [17, 18, 19, 20], q_hand_L_global, "left", palm_normal)
             
-        # Right Hand (Character) <- Left Hand (User)
+        # Mano Derecha (Personaje) <- Mano Izquierda (Usuario)
         if left_hand_lm:
-            # User Left Forearm Global
+            # Antebrazo Izquierdo Usuario Global
             q_u_forearm_global = calc_global_rot(pose_lm, 13, 15, "left_forearm")
             
-            # User Left Hand Global
+            # Mano Izquierda Usuario Global
             q_hand_R_global = self.calculate_basis_rotation(left_hand_lm[0], left_hand_lm[9], left_hand_lm[17])
             
-            # User Wrist Local
+            # Muñeca Usuario Local
             q_wrist_local = self.multiply_quaternions(self.invert_quaternion(q_u_forearm_global), q_hand_R_global)
             
             bones["hand_fk.R"] = q_wrist_local.tolist()
             
-            # Calculate Palm Normal
+            # Calcular Normal de Palma
             r_hand = R.from_quat([q_hand_R_global[1], q_hand_R_global[2], q_hand_R_global[3], q_hand_R_global[0]])
-            # Invert to make fingers curl toward palm (not away)
+            # Invertir para hacer que los dedos se curven hacia la palma (no hacia afuera)
             palm_normal = -r_hand.apply([0, 0, 1])
             
-            # Fingers
+            # Dedos
             solve_finger_chain(left_hand_lm, "thumb", [1, 2, 3, 4], q_hand_R_global, "right", palm_normal)
             solve_finger_chain(left_hand_lm, "f_index", [5, 6, 7, 8], q_hand_R_global, "right", palm_normal)
             solve_finger_chain(left_hand_lm, "f_middle", [9, 10, 11, 12], q_hand_R_global, "right", palm_normal)
@@ -1077,80 +1052,75 @@ class PoseSolver:
             solve_finger_chain(left_hand_lm, "f_pinky", [17, 18, 19, 20], q_hand_R_global, "right", palm_normal)
 
 
-        # --- 5. IK TARGETS (Hybrid Mode) ---
-        # MIRROR MODE
+        # --- 5. OBJETIVOS IK (Modo Híbrido) ---
+        # MODO ESPEJO
         
-        # Root / Hips Translation
+        # Traslación de Raíz / Caderas
         bones["hips"] = self.calculate_root_translation(results.pose_landmarks.landmark)
         
-        # Get hip center as reference
+        # Obtener centro de cadera como referencia
         mid_hip_pos = np.array([mid_hip.x, mid_hip.y, mid_hip.z])
         
-        # Scale factor (calibrated for character size ~7 units tall)
+        # Factor de escala (calibrado para tamaño de personaje ~7 unidades de alto)
         SCALE = 14.0
         
-        # mid_hip_raw for coordinate conversion consistency (Average of Left and Right Hip)
+        # mid_hip_raw para consistencia de conversión de coordenadas (Promedio de Cadera Izq y Der)
         l_hip = results.pose_landmarks.landmark[23]
         r_hip = results.pose_landmarks.landmark[24]
         mid_hip_raw = np.array([
             -(l_hip.x + r_hip.x) / 2, 
-            ((l_hip.z + r_hip.z) / 2) * 0.5, # DAMPEN DEPTH
+            ((l_hip.z + r_hip.z) / 2) * 0.5, # AMORTIGUAR PROFUNDIDAD
             -(l_hip.y + r_hip.y) / 2
         ])
         
-        # 1. Hands (Wrist Position)
-        # Left Hand (Character) <- Right Wrist (User)
-        l_wrist = results.pose_landmarks.landmark[16] # 16 is Right Wrist
+        # 1. Manos (Posición de Muñeca)
+        l_wrist = results.pose_landmarks.landmark[16]
         l_hand_raw = np.array([-l_wrist.x, l_wrist.z * 0.5, -l_wrist.y])
         l_hand_offset = (l_hand_raw - mid_hip_raw) * SCALE
         bones["hand_ik.L"] = l_hand_offset.tolist()
         
-        # Right Hand (Character) <- Left Wrist (User)
-        r_wrist = results.pose_landmarks.landmark[15] # 15 is Left Wrist
+        # Mano Derecha (Personaje) <- Muñeca Izquierda (Usuario)
+        r_wrist = results.pose_landmarks.landmark[15]
         r_hand_raw = np.array([-r_wrist.x, r_wrist.z * 0.5, -r_wrist.y])
         r_hand_offset = (r_hand_raw - mid_hip_raw) * SCALE
         bones["hand_ik.R"] = r_hand_offset.tolist()
         
-        # 2. Feet (Ankle Position)
-        # Left Foot (Character) <- Right Ankle (User)
-        l_ankle = results.pose_landmarks.landmark[28] # 28 is Right Ankle
+        # 2. Pies (Posición de Tobillo)
+        # Pie Izquierdo (Personaje) <- Tobillo Derecho (Usuario)
+        l_ankle = results.pose_landmarks.landmark[28]
         l_foot_raw = np.array([-l_ankle.x, l_ankle.z * 0.5, -l_ankle.y])
         l_foot_offset = (l_foot_raw - mid_hip_raw) * SCALE
         bones["foot_ik.L"] = l_foot_offset.tolist()
         
-        # Right Foot (Character) <- Left Ankle (User)
-        r_ankle = results.pose_landmarks.landmark[27] # 27 is Left Ankle
+        # Pie Derecho (Personaje) <- Tobillo Izquierdo (Usuario)
+        r_ankle = results.pose_landmarks.landmark[27]
         r_foot_raw = np.array([-r_ankle.x, r_ankle.z * 0.5, -r_ankle.y])
         r_foot_offset = (r_foot_raw - mid_hip_raw) * SCALE
         bones["foot_ik.R"] = r_foot_offset.tolist()
         
-        # 3. Pole Vectors (Elbows and Knees)
-        # Left Elbow Target (Character) <- Right Elbow (User)
-        l_elbow = results.pose_landmarks.landmark[14] # 14 is Right Elbow
+        # 3. Vectores Polares (Codos y Rodillas)
+        l_elbow = results.pose_landmarks.landmark[14]
         l_elbow_raw = np.array([-l_elbow.x, l_elbow.z * 0.5, -l_elbow.y])
         l_elbow_offset = (l_elbow_raw - mid_hip_raw) * SCALE
         bones["upper_arm_ik_target.L"] = l_elbow_offset.tolist()
         
-        # Right Elbow Target (Character) <- Left Elbow (User)
-        r_elbow = results.pose_landmarks.landmark[13] # 13 is Left Elbow
+        r_elbow = results.pose_landmarks.landmark[13]
         r_elbow_raw = np.array([-r_elbow.x, r_elbow.z * 0.5, -r_elbow.y])
         r_elbow_offset = (r_elbow_raw - mid_hip_raw) * SCALE
         bones["upper_arm_ik_target.R"] = r_elbow_offset.tolist()
         
-        # Left Knee Target (Character) <- Right Knee (User)
-        l_knee = results.pose_landmarks.landmark[26] # 26 is Right Knee
+        l_knee = results.pose_landmarks.landmark[26]
         l_knee_raw = np.array([-l_knee.x, l_knee.z * 0.5, -l_knee.y])
         l_knee_offset = (l_knee_raw - mid_hip_raw) * SCALE
         bones["thigh_ik_target.L"] = l_knee_offset.tolist()
         
-        # Right Knee Target (Character) <- Left Knee (User)
-        r_knee = results.pose_landmarks.landmark[25] # 25 is Left Knee
+        r_knee = results.pose_landmarks.landmark[25]
         r_knee_raw = np.array([-r_knee.x, r_knee.z * 0.5, -r_knee.y])
         r_knee_offset = (r_knee_raw - mid_hip_raw) * SCALE
         bones["thigh_ik_target.R"] = r_knee_offset.tolist()
 
-        # --- 6. SMOOTHING ---
-        # Apply OneEuroFilter to all bone data
+        # --- 6. SUAVIZADO ---
+        # Aplicar OneEuroFilter a todos los datos de huesos
         smoothed_bones = self.smoother.update(bones)
         
         return smoothed_bones
